@@ -17,7 +17,14 @@ main.py 와 같은 구조 (Adam + clip 50, EMA 0.995) 에 rollout 만 갈아끼�
     # 정답 미분이 아니다 (verify_cimpc.py [B], CIMPC_NOTES 9절). rho=0 비교군은 --backend cimpc --rho 0 을 쓸 것.
     python train_cimpc.py --forward cimpc --backend mjx --n-sub 2 --steps 20000 --batch 256
 
+    # DiffSim (de Saxcé full-cone central-path, diffsim_grad.py): 논문 설정은 hard forward.
+    # rho 는 impulse x velocity 단위. Go1 substep 에서 lam_n ~ 0.15-0.3 N s 이므로 0.01-0.1 부근을 스윕.
+    python train_cimpc.py --forward cimpc --backend diffsim --rho 0.05 --delta 0.0 --n-sub 2 --steps 20000 --batch 256
+    # DynaFlow 의 MJX forward 를 그대로 두고 backward 만 DiffSim (Newton warm start = MJX 접촉력)
+    python train_cimpc.py --backend diffsim --rho 0.05 --n-sub 2 --steps 20000 --batch 256
+
 저장 위치: checkpoints/<시각>_<name>/state_<step>   (EMA 상태, tester.py/eval_metrics.py 호환)
+영상: --record-every 1000 을 주면 main.py 와 같은 rollout/{trot,bound}/<step>.mp4, rhc/{trot,bound}/<step>.mp4 저장 (기본 끔)
 """
 import os
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -39,12 +46,21 @@ import module
 import loadData
 import diffsim
 import cimpc_grad as cg
+import diffsim_grad as dg
 from diffsim import state_to_obs
 from config import PREFIX
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--backend", choices=["mjx", "cimpc"], default="cimpc")
-ap.add_argument("--rho", type=float, default=1e-4)
+ap.add_argument("--backend", choices=["mjx", "cimpc", "diffsim"], default="cimpc")
+ap.add_argument("--rho", type=float, default=1e-4,
+                help="cimpc: eq.(19) 의 rho (기본 1e-4). diffsim: central-path rho (0.01-0.1 권장)")
+ap.add_argument("--delta", type=float, default=0.0, help="diffsim: normal free-velocity offset [m/s] (eq.16)")
+ap.add_argument("--beta", type=float, default=0.1, help="diffsim: Newton 의 residual-scaled LM damping")
+ap.add_argument("--n-newton", type=int, default=10, help="diffsim: Newton 반복수 (고정)")
+ap.add_argument("--n-linesearch", type=int, default=8, help="diffsim: |F| backtracking 횟수 (0 = C++ 기본과 동일)")
+ap.add_argument("--lam-eval", choices=["relaxed", "hard"], default="relaxed",
+                help="diffsim: df/dx 의 나머지 인자를 lam* (논문/C++) 또는 lam_h (2D 재현) 에서 평가")
+ap.add_argument("--no-cut", action="store_true", help="diffsim: 비물리적 root 접촉의 dlam=0 절단을 끈다")
 ap.add_argument("--n-sub", type=int, default=2,
                 help="backward substep 수. --forward mjx 면 forward 는 항상 4 (0.005 x 4)")
 ap.add_argument("--forward", choices=["mjx", "cimpc"], default="mjx",
@@ -60,6 +76,8 @@ ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--ema-decay", type=float, default=0.995)
 ap.add_argument("--ema-start", type=int, default=1000)
 ap.add_argument("--save-every", type=int, default=1000)
+ap.add_argument("--record-every", type=int, default=0,
+                help="N>0 이면 N step 마다 main.py 와 같은 영상 4개 저장 (rollout/{trot,bound}, rhc/{trot,bound}). 0 = 끔")
 ap.add_argument("--log-every", type=int, default=100)
 ap.add_argument("--name", type=str, default=None)
 ap.add_argument("--ckpt-root", type=str, default=os.path.join(PREFIX, "checkpoints"))
@@ -118,6 +136,32 @@ def build_loss(env, dataset, rollout_fn, horizon):
     return loss_fn
 
 
+def record_videos(env, testmodel, save_dir, step, rng):
+    """main.py 의 'Evaluation / Rendering' 블록과 동일. rng 는 main.py 처럼 학습 rng 를 split 해서 쓴다."""
+    q0 = np.array([
+        0.0, 0.0, 0.27,  # base pos
+        1.0, 0.0, 0.0, 0.0,  # base orientation (quat)
+        0.0, 0.9, -1.8,  # FR: abduction, hip, knee
+        0.0, 0.9, -1.8,  # FL
+        0.0, 0.9, -1.8,  # RR
+        0.0, 0.9, -1.8  # RL
+    ])
+    dq0 = np.zeros(env.mjx_model.nv)
+
+    rng, rhc_rng = jax.random.split(rng)
+    env.render_openloop(testmodel, q0, dq0, 200, v_command=[1, 1.0, 0, 0], rng=rhc_rng,
+                        name=save_dir + f"/rollout/trot/{step}.mp4", window=16)
+    env.render_openloop(testmodel, q0, dq0, 200, v_command=[2, 1.0, 0, 0], rng=rhc_rng,
+                        name=save_dir + f"/rollout/bound/{step}.mp4", window=16)
+
+    rng, rhc_rng = jax.random.split(rng)
+    env.render_rhc(testmodel, q0, dq0, 200, v_command=[1, 1.5, 0, 0], rng=rhc_rng,
+                   name=save_dir + f"/rhc/trot/{step}.mp4")
+    env.render_rhc(testmodel, q0, dq0, 200, v_command=[2, 1.5, 0, 0], rng=rhc_rng,
+                   name=save_dir + f"/rhc/bound/{step}.mp4")
+    return rng
+
+
 def main():
     fwd_n_sub = args.fwd_n_sub or args.n_sub
     if args.forward == "cimpc" and args.backend == "cimpc" and fwd_n_sub != args.n_sub:
@@ -127,9 +171,13 @@ def main():
         print("[경고] --forward cimpc --backend mjx: hard-contact solver 의 plain autodiff 는 sliding 접촉에서 "
               "bisection 의 bracket 선택을 미분하므로 정답 미분이 아니다 (FD 와 ~10% 어긋남, verify_cimpc.py [B]). "
               "rho=0 비교군은 --backend cimpc --rho 0 을 권장한다.")
-    name = args.name or ((f"CIMPC_rho{args.rho:g}_nsub{args.n_sub}" if args.backend == "cimpc"
-                          else "MJX_baseline")
-                         + (f"_fwdcimpc{fwd_n_sub}" if args.forward == "cimpc" else ""))
+    if args.backend == "cimpc":
+        base = f"CIMPC_rho{args.rho:g}_nsub{args.n_sub}"
+    elif args.backend == "diffsim":
+        base = f"DIFFSIM_rho{args.rho:g}_delta{args.delta:g}_nsub{args.n_sub}"
+    else:
+        base = "MJX_baseline"
+    name = args.name or (base + (f"_fwdcimpc{fwd_n_sub}" if args.forward == "cimpc" else ""))
     stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     save_dir = os.path.join(args.ckpt_root, f"{stamp}_{name}")
     os.makedirs(save_dir, exist_ok=True)
@@ -144,8 +192,15 @@ def main():
     np.random.seed(42 + args.seed)
     stream = loadData.make_data_stream(dataset, args.batch)
 
-    backend = None if args.backend == "mjx" else partial(
-        cg.cimpc_jacobian, rho=args.rho, n_sub=args.n_sub, forward=args.forward)
+    if args.backend == "mjx":
+        backend = None
+    elif args.backend == "cimpc":
+        backend = partial(cg.cimpc_jacobian, rho=args.rho, n_sub=args.n_sub, forward=args.forward)
+    else:
+        backend = partial(dg.diffsim_jacobian, rho=args.rho, delta=args.delta, beta=args.beta,
+                          n_newton=args.n_newton, n_linesearch=args.n_linesearch,
+                          cut_spurious=not args.no_cut, lam_eval=args.lam_eval,
+                          n_sub=args.n_sub, forward=args.forward)
     rollout_fn = cg.make_batched_rollout(env, backend, chunk=args.chunk,
                                          forward=args.forward,
                                          fwd_n_sub=fwd_n_sub if args.forward == "cimpc" else None)
@@ -197,6 +252,19 @@ def main():
         if step % args.save_every == 0 and step > 0:
             checkpointer.save(os.path.join(save_dir, f"state_{step}"), ema_state)
             print(f"  saved state_{step}")
+
+        if args.record_every > 0 and step % args.record_every == 0:
+            # main.py 와 같은 규칙: 체크포인트 step 이면 EMA 모델, 아니면 현재 모델로 렌더
+            if step % args.save_every == 0:
+                graphdef, _ = nnx.split(model)
+                testmodel = nnx.merge(graphdef, ema_state)
+                print(f"  render with EMA state (step {step})")
+            else:
+                testmodel = model
+                print(f"  render with current model (step {step})")
+            tr = time.time()
+            rng = record_videos(env, testmodel, save_dir, step, rng)
+            print(f"  videos saved to {save_dir}/{{rollout,rhc}}/{{trot,bound}}/{step}.mp4 ({time.time()-tr:.0f}s)")
 
     checkpointer.wait_until_finished()
     print(f"완료: {save_dir}")

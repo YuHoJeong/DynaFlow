@@ -12,8 +12,8 @@ import diffsim
 from config import PREFIX
 
 
-checkpoint_name = '2026-08-18-15-07-27_DynaFlow'
-target_epoch = 50000
+checkpoint_name = '2026-10-30-14-51-28_cimpc_rho1e-4_fwdhard'
+target_epoch = 2000
 
 load_dir = os.path.join(PREFIX, 'checkpoints', checkpoint_name)
 

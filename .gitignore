@@ -9,3 +9,9 @@ cache/*
 *.png
 *.txt
 !cimpc_ref/CMakeLists.txt
+*.part
+cimpc_ref/build/
+rho_sweep_results/*
+!rho_sweep_results/diffsim/
+rho_sweep_results/diffsim/*
+!rho_sweep_results/diffsim/run.sh

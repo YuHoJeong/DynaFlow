@@ -1,0 +1,17 @@
+# CI-MPC C++ 원본에서 gradient 를 덤프하는 최소 빌드.
+# raisim / qpSWIFT / matplotlib 는 필요 없다 (contactSolverGradient 는 pinocchio+Eigen 만 씀).
+cmake_minimum_required(VERSION 3.16)
+project(cimpc_ref LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_BUILD_TYPE Release)
+if(NOT DEFINED CIMPC_SRC)
+  set(CIMPC_SRC "$ENV{HOME}/workspace/general_contact_TO/contact_solving_gradient")
+endif()
+find_package(Eigen3 3.3 REQUIRED)
+find_package(pinocchio REQUIRED)
+add_library(contactSolverGradient STATIC ${CMAKE_CURRENT_BINARY_DIR}/contactSolverGradient_patched.cpp)
+target_include_directories(contactSolverGradient PUBLIC ${CIMPC_SRC}/include ${EIGEN3_INCLUDE_DIRS} ${pinocchio_INCLUDE_DIRS})
+target_link_libraries(contactSolverGradient PUBLIC ${pinocchio_LIBRARIES} Eigen3::Eigen)
+add_executable(dump_gradient ${CMAKE_CURRENT_SOURCE_DIR}/dump_gradient.cpp)
+target_include_directories(dump_gradient PUBLIC ${CIMPC_SRC}/include)
+target_link_libraries(dump_gradient PUBLIC contactSolverGradient ${pinocchio_LIBRARIES} Eigen3::Eigen)

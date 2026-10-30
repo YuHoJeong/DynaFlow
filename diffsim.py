@@ -214,13 +214,13 @@ class Env:
         return normalized_action * self.act_range + self.nominal_ptarg
 
 
-
+# action 하나로 시뮬레이터를 n_substeps번 진행
 def control_step(mjx_model: mjx.Model, data: mjx.Data, u: jnp.ndarray, n_substeps: int):
     data = data.replace(ctrl=u)
     final_data = jax.lax.fori_loop(0, n_substeps, lambda i, d: mjx.step(mjx_model, d), data)
     return final_data
 
-
+# action_traj 전체를 순서대로 적용해서 trajectory 하나 생성
 @partial(jax.jit, static_argnames=("env",))
 def rollout(env: Env, q0: jnp.ndarray, dq0: jnp.ndarray, action_traj: jnp.ndarray):
     def step_fn(data: mjx.Data, u: jnp.ndarray):
@@ -231,7 +231,7 @@ def rollout(env: Env, q0: jnp.ndarray, dq0: jnp.ndarray, action_traj: jnp.ndarra
     _, traj = jax.lax.scan(step_fn, init_data, action_traj)
     return traj
 
-
+# 여러 개의 rollout을 batch로 동시에 실행
 @partial(jax.jit, static_argnames=("env",))
 def batched_rollout(env: Env, q0: jnp.ndarray, dq0: jnp.ndarray, action_traj: jnp.ndarray):
     return jax.vmap(rollout, in_axes=(None, 0, 0, 0))(env, q0, dq0, action_traj)

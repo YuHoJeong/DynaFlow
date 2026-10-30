@@ -8,3 +8,4 @@ cache/*
 *.pdf
 *.png
 *.txt
+!cimpc_ref/CMakeLists.txt

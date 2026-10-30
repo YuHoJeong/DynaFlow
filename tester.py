@@ -1,4 +1,8 @@
 import os
+
+# JAX가 GPU 메모리의 75%를 선점하면 MuJoCo 렌더러(EGL)와 충돌하므로 비활성화
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
 import numpy as np
 import jax
 import flax.nnx as nnx
@@ -8,8 +12,8 @@ import diffsim
 from config import PREFIX
 
 
-checkpoint_name = '2026-06-04-07-22-35_DynaFlow'
-target_epoch = 1000
+checkpoint_name = '2026-08-18-15-07-27_DynaFlow'
+target_epoch = 50000
 
 load_dir = os.path.join(PREFIX, 'checkpoints', checkpoint_name)
 
